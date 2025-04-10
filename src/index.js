@@ -1,7 +1,7 @@
 require("dotenv").config();
 const express = require("express");
 const TelegramBot = require("node-telegram-bot-api");
-const { GoogleGenerativeAI } = require("@google/generative-ai");
+const { GoogleGenAI, Type } = require("@google/genai");
 const { createClient } = require("@supabase/supabase-js");
 const axios = require("axios");
 
@@ -13,8 +13,64 @@ const port = process.env.PORT || 3000;
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
 
 // Initialize Gemini AI
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+
+// Define the response schema for financial data
+const FINANCIAL_SCHEMA = {
+  type: Type.OBJECT,
+  properties: {
+    value: {
+      type: Type.NUMBER,
+      description: "The payment amount as a number",
+      nullable: false,
+    },
+    description: {
+      type: Type.STRING,
+      description: "Brief description of what the payment was for",
+      nullable: false,
+    },
+    category: {
+      type: Type.STRING,
+      description: "Category of the expense (e.g., food, transport, utilities)",
+      nullable: false,
+    },
+    payed_at: {
+      type: Type.STRING,
+      description: "Payment date in ISO format",
+      format: "date-time",
+      nullable: true,
+    },
+    data: {
+      type: Type.OBJECT,
+      description: "Additional relevant information",
+      properties: {
+        location: {
+          type: Type.STRING,
+          description: "Place where the payment was made",
+          nullable: true,
+        },
+        merchant: {
+          type: Type.STRING,
+          description: "Name of the merchant or service provider",
+          nullable: true,
+        },
+        payment_method: {
+          type: Type.STRING,
+          description: "Method of payment (e.g., cash, card, transfer)",
+          nullable: true,
+        },
+        notes: {
+          type: Type.STRING,
+          description: "Any additional notes or comments",
+          nullable: true,
+        },
+      },
+      nullable: true,
+    },
+  },
+  required: ["value", "description", "category"],
+  propertyOrdering: ["value", "description", "category", "payed_at", "data"],
+};
 
 // Initialize Supabase
 const supabase = createClient(
@@ -23,29 +79,17 @@ const supabase = createClient(
 );
 
 // Prompt template for Gemini
-const EXTRACTION_PROMPT = `You are a financial data extraction assistant. Your task is to extract financial information from messages and return it in a specific JSON format.
+const EXTRACTION_PROMPT = `Extract financial information from the input.
 
-When given a message or image, analyze it and extract:
+For images, look for receipts, invoices, or any text containing payment information.
+For text messages, analyze the content for payment details.
+
+Focus on extracting:
 - Payment amount (in numbers)
 - Payment description
 - Category (e.g., food, transport, utilities)
 - Date (if mentioned)
-
-For images, look for receipts, invoices, or any text containing payment information.
-
-IMPORTANT: You must ONLY return a valid JSON object with the following structure:
-{
-  "value": <number>,
-  "description": "<string>",
-  "category": "<string>",
-  "payed_at": "<ISO date string or null>",
-  "data": {}
-}
-
-If no financial information is found, return exactly: {"value": null, "description": null, "category": null, "payed_at": null, "data": {}}
-
-DO NOT include any additional text, explanations, or formatting - ONLY the JSON object.
-`;
+- Additional details like location, merchant, payment method, or any relevant notes`;
 
 // Function to process financial data
 async function processFinancialData(financialData, chatId) {
@@ -70,16 +114,35 @@ async function processFinancialData(financialData, chatId) {
       return;
     }
 
-    await bot.sendMessage(
-      chatId,
+    // Build response message
+    let responseMessage =
       `✅ Payment recorded!\n\n` +
-        `Amount: $${financialData.value}\n` +
-        `Description: ${financialData.description}\n` +
-        `Category: ${financialData.category}` +
-        (financialData.payed_at
-          ? `\nDate: ${new Date(financialData.payed_at).toLocaleDateString()}`
-          : "")
-    );
+      `Amount: $${financialData.value}\n` +
+      `Description: ${financialData.description}\n` +
+      `Category: ${financialData.category}`;
+
+    if (financialData.payed_at) {
+      responseMessage += `\nDate: ${new Date(
+        financialData.payed_at
+      ).toLocaleDateString()}`;
+    }
+
+    if (financialData.data) {
+      if (financialData.data.location) {
+        responseMessage += `\nLocation: ${financialData.data.location}`;
+      }
+      if (financialData.data.merchant) {
+        responseMessage += `\nMerchant: ${financialData.data.merchant}`;
+      }
+      if (financialData.data.payment_method) {
+        responseMessage += `\nPayment Method: ${financialData.data.payment_method}`;
+      }
+      if (financialData.data.notes) {
+        responseMessage += `\nNotes: ${financialData.data.notes}`;
+      }
+    }
+
+    await bot.sendMessage(chatId, responseMessage);
   } else {
     await bot.sendMessage(
       chatId,
@@ -97,7 +160,7 @@ async function getImageAsBase64(url) {
 // Handle incoming messages
 bot.on("message", async (msg) => {
   try {
-    let content;
+    let contents;
 
     // Check if the message contains a photo
     if (msg.photo) {
@@ -109,18 +172,19 @@ bot.on("message", async (msg) => {
       // Convert image to base64
       const imageBase64 = await getImageAsBase64(fileUrl);
 
-      // Create image part for Gemini
-      const imagePart = {
-        inlineData: {
-          data: imageBase64,
-          mimeType: "image/jpeg",
+      // Create content with image
+      contents = [
+        EXTRACTION_PROMPT,
+        {
+          inlineData: {
+            data: imageBase64,
+            mimeType: "image/jpeg",
+          },
         },
-      };
-
-      content = [EXTRACTION_PROMPT, imagePart];
+      ];
     } else if (msg.text) {
       // Handle text messages
-      content = EXTRACTION_PROMPT + "\n\nMessage to analyze: " + msg.text;
+      contents = EXTRACTION_PROMPT + "\n\nMessage to analyze: " + msg.text;
     } else {
       await bot.sendMessage(
         msg.chat.id,
@@ -129,18 +193,24 @@ bot.on("message", async (msg) => {
       return;
     }
 
-    const result = await model.generateContent(content);
-    const response = await result.response;
-    const text = response.text().trim();
+    // Generate content with structured output
+    const response = await ai.models.generateContent({
+      model: "gemini-2.0-flash",
+      contents,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: FINANCIAL_SCHEMA,
+      },
+    });
 
-    console.log("Gemini response:", text);
+    console.log("Gemini response:", response.text);
 
     let financialData;
     try {
-      financialData = JSON.parse(text);
+      financialData = JSON.parse(response.text);
     } catch (e) {
       console.error("Failed to parse Gemini response:", e);
-      console.error("Raw response:", text);
+      console.error("Raw response:", response.text);
       await bot.sendMessage(
         msg.chat.id,
         "Sorry, I couldn't understand the financial information in your message."
