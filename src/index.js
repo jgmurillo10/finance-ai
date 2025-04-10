@@ -9,6 +9,9 @@ const axios = require("axios");
 const app = express();
 const port = process.env.PORT || 3000;
 
+// Authorized chat ID
+const AUTHORIZED_CHAT_ID = 5339374189;
+
 // Initialize Telegram Bot
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
 
@@ -157,8 +160,23 @@ async function getImageAsBase64(url) {
   return Buffer.from(response.data).toString("base64");
 }
 
+// Function to check if message is from authorized user
+function isAuthorizedUser(chatId) {
+  return chatId === AUTHORIZED_CHAT_ID;
+}
+
 // Handle incoming messages
 bot.on("message", async (msg) => {
+  // Check if message is from authorized user
+  if (!isAuthorizedUser(msg.chat.id)) {
+    console.log(`Unauthorized access attempt from chat ID: ${msg.chat.id}`);
+    await bot.sendMessage(
+      msg.chat.id,
+      "Sorry, you are not authorized to use this bot."
+    );
+    return;
+  }
+
   try {
     let contents;
 
@@ -228,7 +246,20 @@ bot.on("message", async (msg) => {
   }
 });
 
+// Add error handler for bot
+bot.on("polling_error", (error) => {
+  console.error("Telegram bot polling error:", error);
+});
+
+// Add error handler for unhandled rejections
+process.on("unhandledRejection", (error) => {
+  console.error("Unhandled rejection:", error);
+});
+
 // Start Express server
 app.listen(port, () => {
   console.log(`Server is running on port ${port}`);
+  console.log(
+    `Bot is configured to respond only to chat ID: ${AUTHORIZED_CHAT_ID}`
+  );
 });
