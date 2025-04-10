@@ -94,6 +94,11 @@ Focus on extracting:
 // Function to process financial data
 async function processFinancialData(financialData, chatId) {
   if (financialData && financialData.value !== null) {
+    // Set current date as fallback for payed_at if not provided
+    if (!financialData.payed_at) {
+      financialData.payed_at = new Date().toISOString();
+    }
+
     // Store in Supabase
     const { data, error } = await supabase.from("payments").insert([
       {
@@ -119,13 +124,8 @@ async function processFinancialData(financialData, chatId) {
       `✅ Payment recorded!\n\n` +
       `Amount: $${financialData.value}\n` +
       `Description: ${financialData.description}\n` +
-      `Category: ${financialData.category}`;
-
-    if (financialData.payed_at) {
-      responseMessage += `\nDate: ${new Date(
-        financialData.payed_at
-      ).toLocaleDateString()}`;
-    }
+      `Category: ${financialData.category}\n` +
+      `Date: ${new Date(financialData.payed_at).toLocaleDateString()}`;
 
     if (financialData.data) {
       if (financialData.data.location) {
